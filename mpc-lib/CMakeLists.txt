@@ -12,6 +12,10 @@ endif()
 
 add_subdirectory(src/common)
 
+target_include_directories(cosigner PUBLIC 
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+)
+
 if(${CMAKE_SOURCE_DIR} STREQUAL ${PROJECT_SOURCE_DIR} AND NOT MPC_LIB_SKIP_TESTS)
     enable_testing()
     add_subdirectory(test)
