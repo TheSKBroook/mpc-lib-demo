@@ -1,0 +1,960 @@
+// #include <iostream>
+// #include <memory>
+// #include <map>
+// #include <vector>
+// #include <thread>
+// #include <chrono>
+// #include <sstream>
+// #include <iomanip>
+// #include <cstring>
+// #include <mutex>
+// #include <random>
+// #include <curl/curl.h>
+// #include <functional>
+
+// // MPC Headers (Assumed available in include path)
+// #include "cosigner/asymmetric_eddsa_cosigner_client.h"
+// #include "cosigner/asymmetric_eddsa_cosigner_server.h"
+// #include "cosigner/cmp_key_persistency.h"
+// #include "cosigner/cmp_setup_service.h"
+// #include "cosigner/platform_service.h"
+// #include "cosigner/cosigner_exception.h"
+
+// using namespace fireblocks::common::cosigner;
+
+// // --- CONFIGURATION ---
+// static const std::string RELAY_URL = "http://127.0.0.1:5000";
+// static const std::string TENANT_ID = "DEMO_TENANT";
+// static const std::string KEY_ID = "demo-key-1";
+// static const int TOTAL_PLAYERS = 3;
+// static const uint32_t MPC_PROTOCOL_VERSION = 1;
+
+// // --- HELPER: Hex Serialization (Crucial for MPC) ---
+// std::string to_hex(const uint8_t* data, size_t len) {
+//     std::stringstream ss;
+//     ss << std::hex << std::setfill('0');
+//     for (size_t i = 0; i < len; ++i) ss << std::setw(2) << (int)data[i];
+//     return ss.str();
+// }
+
+// std::string to_hex(const std::vector<uint8_t>& data) {
+//     return to_hex(data.data(), data.size());
+// }
+
+// std::vector<uint8_t> from_hex(const std::string& hex) {
+//     std::vector<uint8_t> data;
+//     for (size_t i = 0; i < hex.length(); i += 2) {
+//         std::string byteString = hex.substr(i, 2);
+//         data.push_back((uint8_t)strtol(byteString.c_str(), nullptr, 16));
+//     }
+//     return data;
+// }
+
+// // --- SERIALIZATION HELPERS FOR MPC TYPES ---
+// std::string serialize_commitment(const commitment& comm) {
+//     std::vector<uint8_t> buffer(64); // 32 bytes salt + 32 bytes commitment
+//     memcpy(buffer.data(), comm.data.salt, 32);
+//     memcpy(buffer.data() + 32, comm.data.commitment, 32);
+//     return to_hex(buffer);
+// }
+
+// commitment deserialize_commitment(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     if (buffer.size() != 64) throw std::runtime_error("Invalid commitment size");
+//     commitment comm;
+//     memcpy(comm.data.salt, buffer.data(), 32);
+//     memcpy(comm.data.commitment, buffer.data() + 32, 32);
+//     return comm;
+// }
+
+// std::string serialize_decommitment(const setup_decommitment& decomm) {
+//     std::vector<uint8_t> buffer;
+    
+//     // 1. ack
+//     buffer.insert(buffer.end(), decomm.ack, decomm.ack + sizeof(decomm.ack));
+    
+//     // 2. seed
+//     buffer.insert(buffer.end(), decomm.seed, decomm.seed + sizeof(decomm.seed));
+    
+//     // 3. share.X (Use sizeof!)
+//     // If the SDK stores compressed points (33 bytes), this will now be correct.
+//     size_t x_len = sizeof(decomm.share.X.data); 
+//     buffer.insert(buffer.end(), decomm.share.X.data, decomm.share.X.data + x_len);
+    
+//     // 4. share.schnorr_R (Use sizeof!)
+//     size_t r_len = sizeof(decomm.share.schnorr_R.data);
+//     buffer.insert(buffer.end(), decomm.share.schnorr_R.data, decomm.share.schnorr_R.data + r_len);
+    
+//     // 5. paillier
+//     uint32_t paillier_len = decomm.paillier_public_key.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&paillier_len, (uint8_t*)&paillier_len + 4);
+//     buffer.insert(buffer.end(), decomm.paillier_public_key.begin(), decomm.paillier_public_key.end());
+    
+//     // 6. ring pedersen
+//     uint32_t ring_len = decomm.ring_pedersen_public_key.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&ring_len, (uint8_t*)&ring_len + 4);
+//     buffer.insert(buffer.end(), decomm.ring_pedersen_public_key.begin(), decomm.ring_pedersen_public_key.end());
+    
+//     return to_hex(buffer);
+// }
+
+// setup_decommitment deserialize_decommitment(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     setup_decommitment decomm;
+//     size_t offset = 0;
+
+//     // Helper macro to prevent overflow
+//     #define CHECK_BOUNDS(len) if (offset + (len) > buffer.size()) throw std::runtime_error("Buffer underflow");
+
+//     // 1. ack
+//     size_t ack_len = sizeof(decomm.ack);
+//     CHECK_BOUNDS(ack_len);
+//     memcpy(decomm.ack, buffer.data() + offset, ack_len);
+//     offset += ack_len;
+
+//     // 2. seed
+//     size_t seed_len = sizeof(decomm.seed);
+//     CHECK_BOUNDS(seed_len);
+//     memcpy(decomm.seed, buffer.data() + offset, seed_len);
+//     offset += seed_len;
+
+//     // 3. share.X
+//     size_t x_len = sizeof(decomm.share.X.data);
+//     CHECK_BOUNDS(x_len);
+//     memcpy(decomm.share.X.data, buffer.data() + offset, x_len);
+//     offset += x_len;
+    
+//     // 4. share.schnorr_R
+//     size_t r_len = sizeof(decomm.share.schnorr_R.data);
+//     CHECK_BOUNDS(r_len);
+//     memcpy(decomm.share.schnorr_R.data, buffer.data() + offset, r_len);
+//     offset += r_len;
+
+//     // 5. paillier
+//     CHECK_BOUNDS(4);
+//     uint32_t paillier_len;
+//     memcpy(&paillier_len, buffer.data() + offset, 4);
+//     offset += 4;
+    
+//     CHECK_BOUNDS(paillier_len);
+//     decomm.paillier_public_key.assign(buffer.begin() + offset, buffer.begin() + offset + paillier_len);
+//     offset += paillier_len;
+
+//     // 6. ring pedersen
+//     CHECK_BOUNDS(4);
+//     uint32_t ring_len;
+//     memcpy(&ring_len, buffer.data() + offset, 4);
+//     offset += 4;
+
+//     CHECK_BOUNDS(ring_len);
+//     decomm.ring_pedersen_public_key.assign(buffer.begin() + offset, buffer.begin() + offset + ring_len);
+//     // offset += ring_len; // Not strictly needed at end, but good practice
+
+//     return decomm;
+// }
+
+// // --- EDDSA SIGNING SERIALIZATION ---
+
+// std::string serialize_eddsa_commitments(const std::vector<eddsa_commitment>& comms) {
+//     std::vector<uint8_t> buffer;
+//     uint32_t count = comms.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&count, (uint8_t*)&count + 4);
+//     for (const auto& comm : comms) {
+//         buffer.insert(buffer.end(), comm.begin(), comm.end());
+//     }
+//     return to_hex(buffer);
+// }
+
+// std::vector<eddsa_commitment> deserialize_eddsa_commitments(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     size_t offset = 0;
+//     uint32_t count;
+//     memcpy(&count, buffer.data() + offset, 4);
+//     offset += 4;
+    
+//     std::vector<eddsa_commitment> comms;
+//     for (uint32_t i = 0; i < count; i++) {
+//         eddsa_commitment comm;
+//         memcpy(comm.data(), buffer.data() + offset, 32);
+//         offset += 32;
+//         comms.push_back(comm);
+//     }
+//     return comms;
+// }
+
+// std::string serialize_elliptic_curve_points(const std::vector<elliptic_curve_point>& points) {
+//     std::vector<uint8_t> buffer;
+//     uint32_t count = points.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&count, (uint8_t*)&count + 4);
+//     for (const auto& point : points) {
+//         buffer.insert(buffer.end(), point.data, point.data + 33);  // 33 bytes for compressed point
+//     }
+//     return to_hex(buffer);
+// }
+
+// std::vector<elliptic_curve_point> deserialize_elliptic_curve_points(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     size_t offset = 0;
+//     uint32_t count;
+//     memcpy(&count, buffer.data() + offset, 4);
+//     offset += 4;
+    
+//     std::vector<elliptic_curve_point> points;
+//     for (uint32_t i = 0; i < count; i++) {
+//         elliptic_curve_point point;
+//         memcpy(point.data, buffer.data() + offset, 33);  // 33 bytes for compressed point
+//         offset += 33;
+//         points.push_back(point);
+//     }
+//     return points;
+// }
+
+// std::string serialize_Rs_and_commitments(const Rs_and_commitments& rs) {
+//     std::vector<uint8_t> buffer;
+    
+//     // Rs vector
+//     uint32_t rs_count = rs.Rs.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&rs_count, (uint8_t*)&rs_count + 4);
+//     for (const auto& point : rs.Rs) {
+//         buffer.insert(buffer.end(), point.data, point.data + 33);  // 33 bytes for compressed point
+//     }
+    
+//     // R_commitment (single commitment, 32 bytes)
+//     buffer.insert(buffer.end(), rs.R_commitment.begin(), rs.R_commitment.end());
+    
+//     return to_hex(buffer);
+// }
+
+// Rs_and_commitments deserialize_Rs_and_commitments(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     size_t offset = 0;
+//     Rs_and_commitments rs;
+    
+//     // Rs vector
+//     uint32_t rs_count;
+//     memcpy(&rs_count, buffer.data() + offset, 4);
+//     offset += 4;
+//     for (uint32_t i = 0; i < rs_count; i++) {
+//         elliptic_curve_point point;
+//         memcpy(point.data, buffer.data() + offset, 33);  // 33 bytes for compressed point
+//         offset += 33;
+//         rs.Rs.push_back(point);
+//     }
+    
+//     // R_commitment (single commitment, 32 bytes)
+//     memcpy(rs.R_commitment.data(), buffer.data() + offset, 32);
+    
+//     return rs;
+// }
+
+// std::string serialize_commitments(const std::vector<eddsa_commitment>& commitments) {
+//     std::vector<uint8_t> buffer;
+//     uint32_t count = commitments.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&count, (uint8_t*)&count + 4);
+//     for (const auto& commitment : commitments) {
+//         buffer.insert(buffer.end(), commitment.data(), commitment.data() + 32);
+//     }
+//     return to_hex(buffer);
+// }
+
+// std::vector<eddsa_commitment> deserialize_commitments(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     size_t offset = 0;
+//     uint32_t count;
+//     memcpy(&count, buffer.data() + offset, 4);
+//     offset += 4;
+    
+//     std::vector<eddsa_commitment> commitments;
+//     for (uint32_t i = 0; i < count; i++) {
+//         eddsa_commitment commitment;
+//         memcpy(commitment.data(), buffer.data() + offset, 32);
+//         offset += 32;
+//         commitments.push_back(commitment);
+//     }
+//     return commitments;
+// }
+
+// std::string serialize_eddsa_signatures(const std::vector<eddsa_signature>& sigs) {
+//     std::vector<uint8_t> buffer;
+//     uint32_t count = sigs.size();
+//     buffer.insert(buffer.end(), (uint8_t*)&count, (uint8_t*)&count + 4);
+//     for (const auto& sig : sigs) {
+//         buffer.insert(buffer.end(), sig.R, sig.R + 32);
+//         buffer.insert(buffer.end(), sig.s, sig.s + 32);
+//     }
+//     return to_hex(buffer);
+// }
+
+// std::vector<eddsa_signature> deserialize_eddsa_signatures(const std::string& hex) {
+//     auto buffer = from_hex(hex);
+//     size_t offset = 0;
+//     uint32_t count;
+//     memcpy(&count, buffer.data() + offset, 4);
+//     offset += 4;
+    
+//     std::vector<eddsa_signature> sigs;
+//     for (uint32_t i = 0; i < count; i++) {
+//         eddsa_signature sig;
+//         memcpy(sig.R, buffer.data() + offset, 32);
+//         offset += 32;
+//         memcpy(sig.s, buffer.data() + offset, 32);
+//         offset += 32;
+//         sigs.push_back(sig);
+//     }
+//     return sigs;
+// }
+
+// // --- NETWORK MANAGER ---
+// size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
+//     ((std::string*)userp)->append((char*)contents, size * nmemb);
+//     return size * nmemb;
+// }
+
+// class NetworkManager {
+//     uint64_t my_id;
+//     CURL* curl;
+// public:
+//     NetworkManager(uint64_t id) : my_id(id) {
+//         curl = curl_easy_init();
+//     }
+//     ~NetworkManager() { curl_easy_cleanup(curl); }
+
+//     void broadcast(const std::string& round_id, const std::string& data) {
+//         std::string url = RELAY_URL + "/broadcast";
+//         std::string json = "{\"sender_id\": " + std::to_string(my_id) + 
+//                            ", \"round_id\": \"" + round_id + 
+//                            "\", \"data\": \"" + data + "\"}";
+        
+//         struct curl_slist* headers = NULL;
+//         headers = curl_slist_append(headers, "Content-Type: application/json");
+//         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+//         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json.c_str());
+//         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+//         std::string resp;
+//         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+//         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+//         curl_easy_perform(curl);
+//         std::cout << "[NET] Sent Round " << round_id << std::endl;
+//     }
+
+//     std::map<uint64_t, std::string> await_data(const std::string& round_id) {
+//         std::string url = RELAY_URL + "/poll?round_id=" + round_id + 
+//                           "&expected_count=" + std::to_string(TOTAL_PLAYERS);
+        
+//         std::cout << "[NET] Waiting " << round_id << "..." << std::flush;
+//         while (true) {
+//             std::string resp;
+//             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+//             curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+//             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+//             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+//             curl_easy_perform(curl);
+
+//             if (resp.find("\"ready\":true") != std::string::npos) {
+//                 std::cout << " OK!" << std::endl;
+//                 return parse_json_map(resp);
+//             }
+//             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+//         }
+//     }
+    
+//     std::map<uint64_t, std::string> await_data_custom_count(const std::string& round_id, int expected_count) {
+//         std::string url = RELAY_URL + "/poll?round_id=" + round_id + 
+//                           "&expected_count=" + std::to_string(expected_count);
+        
+//         std::cout << "[NET] Waiting " << round_id << " (expecting " << expected_count << ")..." << std::flush;
+//         while (true) {
+//             std::string resp;
+//             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+//             curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+//             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
+//             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+//             curl_easy_perform(curl);
+
+//             if (resp.find("\"ready\":true") != std::string::npos) {
+//                 std::cout << " OK!" << std::endl;
+//                 return parse_json_map(resp);
+//             }
+//             std::this_thread::sleep_for(std::chrono::milliseconds(500));
+//         }
+//     }
+
+//     std::map<uint64_t, std::string> parse_json_map(const std::string& json) {
+//         std::map<uint64_t, std::string> res;
+//         size_t data_start = json.find("\"data\"");
+//         if (data_start == std::string::npos) return res;
+        
+//         size_t brace_pos = json.find("{", data_start);
+//         if (brace_pos == std::string::npos) return res;
+        
+//         for(int i=1; i<=TOTAL_PLAYERS; ++i) {
+//             std::string pattern = "\"" + std::to_string(i) + "\":";
+//             size_t key_pos = json.find(pattern, brace_pos);
+//             if(key_pos == std::string::npos) continue;
+            
+//             size_t value_start = json.find("\"", key_pos + pattern.length());
+//             if (value_start == std::string::npos) continue;
+//             value_start++;
+            
+//             size_t value_end = json.find("\"", value_start);
+//             if (value_end == std::string::npos) continue;
+            
+//             res[i] = json.substr(value_start, value_end - value_start);
+//             brace_pos = value_end;
+//         }
+//         return res;
+//     }
+// };
+
+// // --- IMPLEMENTATION CLASSES (Simplified) ---
+
+// // Mock for Client Preprocessing data persistence
+// class MockClientPersistency : public asymmetric_eddsa_cosigner_client::preprocessing_persistency {
+// public:
+//     std::map<std::string, std::map<uint64_t, std::array<uint8_t, 32>>> stored_nonces;
+    
+//     void create_preprocessed_data(const std::string& key_id, uint64_t size) override {
+//         stored_nonces[key_id].clear();
+//     }
+//     void store_preprocessed_data(const std::string& key_id, uint64_t index, const ed25519_scalar_t& k) override {
+//         std::array<uint8_t, 32> nonce;
+//         memcpy(nonce.data(), k, 32);
+//         stored_nonces[key_id][index] = nonce;
+//     }
+//     void load_preprocessed_data(const std::string& key_id, uint64_t index, ed25519_scalar_t& k) override {
+//         if (stored_nonces.count(key_id) && stored_nonces[key_id].count(index)) {
+//             memcpy(k, stored_nonces[key_id][index].data(), 32);
+//         } else {
+//             // No preprocessed data available - this should not happen!
+//             throw cosigner_exception(cosigner_exception::INVALID_PRESIGNING_INDEX);
+//         }
+//     }
+//     void delete_preprocessed_data(const std::string& key_id) override {
+//         stored_nonces.erase(key_id);
+//     }
+// };
+
+// // Mock for Server Signing data persistence
+// class MockServerPersistency : public asymmetric_eddsa_cosigner_server::signing_persistency {
+// public:
+//     std::map<std::string, asymmetric_eddsa_signing_metadata> signing_data;
+//     std::map<std::string, std::map<uint64_t, std::vector<eddsa_commitment>>> commitments;
+//     std::map<std::string, std::map<uint64_t, eddsa_commitment>> preprocessed_data; // Store client commitments
+    
+//     void create_preprocessed_data(const std::string& key_id, uint64_t size) override {
+//         preprocessed_data[key_id].clear();
+//     }
+//     void store_preprocessed_data(const std::string& key_id, uint64_t index, const eddsa_commitment& R_commitment) override {
+//         preprocessed_data[key_id][index] = R_commitment;
+//     }
+//     void load_preprocessed_data(const std::string& key_id, uint64_t index, eddsa_commitment& R_commitment) override {
+//         if (preprocessed_data.count(key_id) && preprocessed_data[key_id].count(index)) {
+//             R_commitment = preprocessed_data[key_id][index];
+//         } else {
+//             // No preprocessed data - return zeros
+//             memset(R_commitment.data(), 0, 32);
+//         }
+//     }
+//     void delete_preprocessed_data(const std::string& key_id) override {
+//         preprocessed_data.erase(key_id);
+//     }
+//     void store_commitments(const std::string& txid, const std::map<uint64_t, std::vector<eddsa_commitment>>& comms) override {
+//         commitments[txid] = comms;
+//     }
+//     void load_commitments(const std::string& txid, std::map<uint64_t, std::vector<eddsa_commitment>>& comms) override {
+//         if (commitments.count(txid)) comms = commitments[txid];
+//         else throw cosigner_exception(cosigner_exception::INVALID_TRANSACTION);
+//     }
+//     void delete_commitments(const std::string& txid) override { commitments.erase(txid); }
+//     void store_signing_data(const std::string& txid, const asymmetric_eddsa_signing_metadata& data, bool update) override {
+//         signing_data[txid] = data;
+//     }
+//     void load_signing_data(const std::string& txid, asymmetric_eddsa_signing_metadata& data) override {
+//         if (signing_data.count(txid)) data = signing_data[txid];
+//         else throw cosigner_exception(cosigner_exception::INVALID_TRANSACTION);
+//     }
+//     void delete_temporary_signing_data(const std::string& txid) override { signing_data.erase(txid); }
+// };
+
+// // 1. In-Memory Key Storage (Critical for transition KeyGen -> Signing)
+// class InMemoryKeyPersistency : public cmp_setup_service::setup_key_persistency {
+// public:
+//     std::map<std::string, std::vector<uint8_t>> keys;
+//     std::map<std::string, cmp_key_metadata> metas;
+//     std::map<std::string, auxiliary_keys> auxs;
+//     std::map<std::string, setup_data> setup_datas;
+//     std::map<std::string, std::map<uint64_t, commitment>> setup_Scomms;
+
+//     // cmp_key_persistency
+//     bool key_exist(const std::string& id) const override { return keys.count(id); }
+//     void load_key(const std::string& id, cosigner_sign_algorithm& algo, elliptic_curve256_scalar_t& key) const override {
+//         if(!key_exist(id)) throw cosigner_exception(cosigner_exception::BAD_KEY);
+//         algo = EDDSA_ED25519;  // Changed to EDDSA_ED25519
+//         memcpy(key, keys.at(id).data(), 32);
+//     }
+//     const std::string get_tenantid_from_keyid(const std::string&) const override { return TENANT_ID; }
+//     void load_key_metadata(const std::string& id, cmp_key_metadata& m, bool) const override { m = metas.at(id); }
+//     void load_auxiliary_keys(const std::string& id, auxiliary_keys& a) const override { a = auxs.at(id); }
+
+//     // setup_key_persistency
+//     void store_key(const std::string& id, cosigner_sign_algorithm, const elliptic_curve256_scalar_t& key, uint64_t) override {
+//         std::vector<uint8_t> k(32); memcpy(k.data(), key, 32);
+//         keys[id] = k;
+//     }
+//     void store_key_metadata(const std::string& id, const cmp_key_metadata& m, bool) override { metas[id] = m; }
+//     void store_auxiliary_keys(const std::string& id, const auxiliary_keys& a) override { auxs[id] = a; }
+//     void store_keyid_tenant_id(const std::string&, const std::string&) override {}
+//     // Actually implement setup temporary data
+//     void store_setup_data(const std::string& id, const setup_data& data) override { 
+//         setup_datas[id] = data; 
+//     }
+//     void load_setup_data(const std::string& id, setup_data& data) override { 
+//         if (setup_datas.count(id)) {
+//             data = setup_datas.at(id);
+//         } else {
+//             throw cosigner_exception(cosigner_exception::BAD_KEY);
+//         }
+//     }
+//     void store_setup_commitments(const std::string& id, const std::map<uint64_t, commitment>& commitments) override { 
+//         setup_comms[id] = commitments;
+//     }
+//     void load_setup_commitments(const std::string& id, std::map<uint64_t, commitment>& commitments) override { 
+//         if (setup_comms.count(id)) {
+//             commitments = setup_comms.at(id);
+//         } else {
+//             throw cosigner_exception(cosigner_exception::BAD_KEY);
+//         }
+//     }
+//     void delete_temporary_key_data(const std::string& id, bool) override {
+//         setup_datas.erase(id);
+//         setup_comms.erase(id);
+//     }
+// };
+
+// // 2. Simple Platform
+// class SimplePlatform : public platform_service {
+//     uint64_t my_id;
+// public:
+//     SimplePlatform(uint64_t id) : my_id(id) {}
+//     uint64_t get_id_from_keyid(const std::string&) const override { return my_id; }
+//     const std::string get_current_tenantid() const override { return TENANT_ID; }
+//     void gen_random(size_t len, uint8_t* out) const override {
+//         static std::mt19937 rng(std::random_device{}());
+//         std::uniform_int_distribution<uint8_t> dist(0, 255);
+//         for(size_t i=0; i<len; ++i) out[i] = dist(rng);
+//     }
+//     uint64_t now_msec() const override { return 0; }
+//     byte_vector_t encrypt_for_player(uint64_t, const byte_vector_t& d) const override { return d; }
+//     byte_vector_t decrypt_message(const byte_vector_t& d) const override { return d; }
+//     // Unused stubs
+//     void derive_initial_share(const share_derivation_args&, cosigner_sign_algorithm, elliptic_curve256_scalar_t*) const override {}
+//     bool backup_key(const std::string&, cosigner_sign_algorithm, const elliptic_curve256_scalar_t&, const cmp_key_metadata&, const auxiliary_keys&) override { return true; }
+//     void on_start_signing(const std::string&, const std::string&, const signing_data&, const std::string&, const std::set<std::string>&, const signing_type) override {}
+//     void fill_signing_info_from_metadata(const std::string&, std::vector<uint32_t>&) const override {}
+//     bool is_client_id(uint64_t player_id) const override { return player_id == 1; } // Player 1 is the client
+// };
+
+// // --- MAIN LOGIC ---
+
+// // Global persistency objects (persist across preprocessing and signing)
+// MockClientPersistency g_client_pers;
+// MockServerPersistency g_server_pers;
+
+// // Generic MPC Step runner
+// template <typename T>
+// T run_mpc_step(NetworkManager& net, const std::string& round_name, std::function<std::string()> gen_func, std::function<T(std::string)> deser_func) {
+//     std::string data = gen_func();
+//     net.broadcast(round_name, data);
+//     auto received = net.await_data(round_name);
+    
+//     // For demo simplicity, we assume we receive map<id, string> and caller handles aggregation
+//     // This function signature is a bit loose to keep code short
+//     throw std::runtime_error("Not used directly, see specific implementations");
+// }
+
+// void run_keygen(uint64_t my_id, NetworkManager& net, InMemoryKeyPersistency& pers, SimplePlatform& plat) {
+//     std::cout << "\n=== STARTING KEY GENERATION ===\n";
+//     cmp_setup_service service(plat, pers);
+    
+//     // 1. Commitments - Use EDDSA_ED25519 for EdDSA signing
+//     commitment my_comm;
+//     service.generate_setup_commitments(KEY_ID, TENANT_ID, EDDSA_ED25519, {1, 2, 3}, 3, 0, {}, my_comm);
+    
+//     // Serialize commitment properly
+//     net.broadcast("keygen_commit_phase", serialize_commitment(my_comm));
+//     auto r1 = net.await_data("keygen_commit_phase");
+    
+//     std::map<uint64_t, commitment> all_comm;
+//     for(auto& [pid, hex] : r1) {
+//         all_comm[pid] = deserialize_commitment(hex);
+//     }
+
+//     // 2. Decommitments
+//     setup_decommitment my_decomm;
+//     service.store_setup_commitments(KEY_ID, all_comm, my_decomm);
+    
+//     net.broadcast("keygen_reveal_phase", serialize_decommitment(my_decomm));
+//     auto r2 = net.await_data("keygen_reveal_phase");
+    
+//     std::map<uint64_t, setup_decommitment> all_decomm;
+//     for(auto& [pid, hex] : r2) {
+//         all_decomm[pid] = deserialize_decommitment(hex);
+//     }
+
+//     // 3. Proofs (Simplified flow - assuming success)
+//     std::cout << "Skipping full Proof/Paillier details for brevity (requires deep SDK structs)..." << std::endl;
+//     // In a real app, you continue rounds 3, 4, 5 similarly.
+//     // The SDK already stored the private key during generate_setup_commitments, so we don't overwrite it
+    
+//     cmp_key_metadata meta;
+//     meta.algorithm = EDDSA_ED25519;  // Set the algorithm!
+//     meta.t = 3; meta.n = 3;  // 3 players (all nodes)
+    
+//     // Fill players with public shares - use the shares from keygen decommitments
+//     // These public shares were generated by the SDK during generate_setup_commitments
+//     for(auto& [pid, decomm] : all_decomm) {
+//         meta.players_info[pid].public_share = decomm.share.X; // Use the public share from decommitment
+//         std::cout << "Player " << pid << " public_share: " << to_hex(decomm.share.X.data, 33).substr(0, 32) << "..." << std::endl;
+//     }
+    
+//     // Compute the combined public key as the sum of all players' public shares
+//     memset(meta.public_key, 0, sizeof(meta.public_key));
+//     bool first = true;
+//     elliptic_curve256_algebra_ctx_t* ctx = elliptic_curve256_new_ed25519_algebra();
+//     for(auto& [pid, info] : meta.players_info) {
+//         if (first) {
+//             // First share - just copy it
+//             memcpy(meta.public_key, info.public_share.data, 33);
+//             first = false;
+//         } else {
+//             // Add subsequent shares
+//             elliptic_curve_point temp;
+//             memcpy(temp.data, meta.public_key, 33);
+//             elliptic_curve_algebra_status status = ctx->add_points(ctx, 
+//                                                                    (elliptic_curve256_point_t*)meta.public_key, 
+//                                                                    (const elliptic_curve256_point_t*)temp.data, 
+//                                                                    (const elliptic_curve256_point_t*)info.public_share.data);
+//             if (status != ELLIPTIC_CURVE_ALGEBRA_SUCCESS) {
+//                 elliptic_curve256_algebra_ctx_free(ctx);
+//                 std::cerr << "Failed to add public shares!" << std::endl;
+//                 throw std::runtime_error("Public key aggregation failed");
+//             }
+//         }
+//     }
+//     elliptic_curve256_algebra_ctx_free(ctx);
+//     std::cout << "Combined public_key: " << to_hex(meta., 33).substr(0, 32) << "..." << std::endl;
+    
+//     pers.store_key_metadata(KEY_ID, meta, true);
+    
+//     std::cout << "=== KEY GENERATION COMPLETE (Mocked Final Step) ===\n";
+// }
+
+// void run_preprocessing(uint64_t my_id, NetworkManager& net, InMemoryKeyPersistency& pers, SimplePlatform& plat, const std::string& request_id) {
+//     std::cout << "\n=== STARTING PREPROCESSING ===\n";
+    
+//     bool is_client = (my_id == 1);
+//     std::set<uint64_t> players_ids = {1, 2, 3};
+//     uint32_t count = 1000; // Preprocess 1000 nonces
+    
+//     if (is_client) {
+//         // Client generates R-commitments for preprocessing
+//         asymmetric_eddsa_cosigner_client client(plat, pers, g_client_pers);
+        
+//         std::cout << "[Client] Generating " << count << " R-commitments for preprocessing..." << std::endl;
+//         std::vector<eddsa_commitment> R_commitments;
+//         client.start_signature_preprocessing(TENANT_ID, KEY_ID, request_id, 0, count, count, players_ids, R_commitments);
+        
+//         std::cout << "[Client] Generated " << R_commitments.size() << " R-commitments" << std::endl;
+        
+//         // Broadcast to servers
+//         net.broadcast("preprocess_" + request_id, serialize_commitments(R_commitments));
+//         std::cout << "[Client] Broadcast R-commitments to servers" << std::endl;
+        
+//     } else {
+//         // Servers wait for client's R-commitments and store them
+//         std::cout << "[Server] Waiting for client R-commitments..." << std::endl;
+//         auto client_commit_data = net.await_data_custom_count("preprocess_" + request_id, 1);
+//         auto client_commitments = deserialize_commitments(client_commit_data[1]);
+        
+//         std::cout << "[Server] Received " << client_commitments.size() << " R-commitments from client" << std::endl;
+        
+//         // Store for later use
+//         asymmetric_eddsa_cosigner_server server(plat, pers, g_server_pers);
+//         std::cout << "[Server] Storing preprocessing with request_id: " << request_id << std::endl;
+//         server.store_presigning_data(KEY_ID, request_id, 0, count, count, players_ids, 1, client_commitments);
+        
+//         std::cout << "[Server] Stored client R-commitments for request_id: " << request_id << std::endl;
+//     }
+    
+//     std::cout << "=== PREPROCESSING COMPLETE ===\n";
+// }
+
+// void run_signing(uint64_t my_id, bool is_initiator, NetworkManager& net, InMemoryKeyPersistency& pers, SimplePlatform& plat, const std::string& txid) {
+//     std::cout << "\n=== STARTING REAL EDDSA SIGNING ===\n";
+    
+//     bool is_client = (my_id == 1); // Node 1 is client, others are servers
+//     std::set<uint64_t> players_ids = {1, 2, 3};  // All 3 players
+//     std::set<std::string> players_str = {"1", "2", "3"};
+    
+//     // WAIT FOR USER TO TYPE "start"
+//     std::cout << "\n>>> Type 'start' and press Enter to begin signing: " << std::flush;
+//     std::string user_input;
+//     std::cin >> user_input;
+    
+//     if (user_input != "start") {
+//         std::cout << "Signing cancelled." << std::endl;
+//         return;
+//     }
+    
+//     // Synchronization barrier - all nodes broadcast ready signal
+//     std::cout << "[Node " << my_id << "] Broadcasting ready signal..." << std::endl;
+//     net.broadcast("sign_" + txid + "_ready", "ready");
+    
+//     // Wait for all 3 nodes to be ready
+//     std::cout << "[Node " << my_id << "] Waiting for all nodes to be ready..." << std::endl;
+//     net.await_data("sign_" + txid + "_ready");
+//     std::cout << "[Node " << my_id << "] All nodes ready! Starting signing protocol..." << std::endl;
+    
+//     // SERVERS: Verify preprocessed data is available BEFORE starting signing
+//     if (!is_client) {
+//         std::cout << "[Server] Verifying preprocessed data before signing..." << std::endl;
+//         eddsa_commitment loaded_commit;
+//         g_server_pers.load_preprocessed_data(KEY_ID, 0, loaded_commit);
+//         bool is_empty = true;
+//         for (auto byte : loaded_commit) {
+//             if (byte != 0) {
+//                 is_empty = false;
+//                 break;
+//             }
+//         }
+//         if (is_empty) {
+//             std::cout << "[Server] ERROR: No preprocessed data found at index 0!" << std::endl;
+//             std::cout << "[Server] Preprocessing must be completed before signing." << std::endl;
+//             throw cosigner_exception(cosigner_exception::INVALID_PRESIGNING_INDEX);
+//         }
+//         std::cout << "[Server] Preprocessed data verified (commitment: " << to_hex(loaded_commit.data(), 32).substr(0, 16) << "...)" << std::endl;
+//     }
+    
+//     // Message to sign
+//     std::string message = "Hello from distributed MPC!";
+//     signing_data sign_data;
+//     memset(sign_data.chaincode, 0, sizeof(HDChaincode)); // Empty chaincode
+//     signing_block_data block;
+//     block.data = std::vector<uint8_t>(message.begin(), message.end());
+//     block.path = {}; // Empty path
+//     sign_data.blocks.push_back(block);
+    
+//     try {
+//         if (is_client) {
+//             // ==== CLIENT FLOW ====
+//             std::cout << "[Client] Signing message: " << message << std::endl;
+            
+//             asymmetric_eddsa_cosigner_client client(plat, pers, g_client_pers);
+            
+//             // STEP 1: Wait for server R-commitments
+//             std::cout << "[Client] " << std::endl;
+//             std::cout << "[Client] Step 1: Waiting for server R-commitments..." << std::endl;
+//             auto server_commits_data = net.await_data_custom_count("sign_" + txid + "_server_commit", 2);
+            
+//             std::map<uint64_t, std::vector<eddsa_commitment>> all_commitments;
+//             for (auto& [pid, hex] : server_commits_data) {
+//                 all_commitments[pid] = deserialize_commitments(hex);
+//                 std::cout << "[Client] Received " << all_commitments[pid].size() 
+//                           << " commitments from server " << pid << std::endl;
+//             }
+            
+//             // Note: Client doesn't have decommit_r() method, it uses eddsa_sign_offline() directly
+//             // The client implicitly generates Rs when calling eddsa_sign_offline()
+            
+//             // STEP 4: Wait for server decommitted Rs (after broadcast_r)
+//             std::cout << "[Client] " << std::endl;
+//             std::cout << "[Client] Step 4: Waiting for server Rs..." << std::endl;
+//             auto server_Rs_data = net.await_data_custom_count("sign_" + txid + "_server_r", 2);
+            
+//             // Parse Rs from servers
+//             std::map<uint64_t, Rs_and_commitments> server_Rs;
+//             for (auto& [pid, hex] : server_Rs_data) {
+//                 if (pid == my_id) continue;
+//                 server_Rs[pid] = deserialize_Rs_and_commitments(hex);
+//                 std::cout << "[Client] Received " << server_Rs[pid].Rs.size() 
+//                           << " Rs from server " << pid << std::endl;
+//             }
+            
+//             // STEP 5: Generate partial signatures (client implicitly decommits here)
+//             std::cout << "[Client] " << std::endl;
+//             std::cout << "[Client] Step 5: Generating partial signatures..." << std::endl;
+//             std::cout << "[Client] Using preprocessed_data_index=0 with KEY_ID=" << KEY_ID << std::endl;
+//             std::vector<eddsa_signature> partial_sigs;
+//             client.eddsa_sign_offline(KEY_ID, txid, sign_data, "{}", players_str, players_ids, 0, server_Rs, partial_sigs);
+            
+//             std::cout << "[Client] Generated " << partial_sigs.size() << " partial signature(s)" << std::endl;
+            
+//             // Broadcast partial signatures to servers
+//             net.broadcast("sign_" + txid + "_r2", serialize_eddsa_signatures(partial_sigs));
+            
+//             // Wait for final signatures from servers (only need 1 server's response)
+//             std::cout << "[Client] Waiting for final signatures..." << std::endl;
+//             auto r3_data = net.await_data_custom_count("sign_" + txid + "_r3", 2);
+            
+//             // Get final signature from any server
+//             auto final_sigs = deserialize_eddsa_signatures(r3_data.begin()->second);
+            
+//             std::cout << "\n=== SIGNATURE SUCCESS ===\n";
+//             std::cout << "Message: \"" << message << "\"" << std::endl;
+//             std::cout << "Full Signature R (32 bytes): " << to_hex(final_sigs[0].R, 32) << std::endl;
+//             std::cout << "Full Signature s (32 bytes): " << to_hex(final_sigs[0].s, 32) << std::endl;
+//             std::cout << "Combined Signature (64 bytes): " << to_hex(final_sigs[0].R, 32) << to_hex(final_sigs[0].s, 32) << std::endl;
+//             std::cout << "=========================\n" << std::endl;
+            
+//         } else {
+//             // ==== SERVER FLOW ====
+//             std::cout << "[Server] Participating in signing" << std::endl;
+            
+//             asymmetric_eddsa_cosigner_server server(plat, pers, g_server_pers);
+            
+//             // STEP 1: Generate server's R-commitments (client commitments already stored from preprocessing)
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 1: Generating server R-commitments..." << std::endl;
+//             std::cout << "[Server] Using txid for signing: " << txid << std::endl;
+//             std::vector<eddsa_commitment> server_R_commitments;
+//             Rs_and_commitments server_Rs;
+//             server.eddsa_sign_offline(KEY_ID, txid, sign_data, "{}", players_str, players_ids, 0, 
+//                 server_R_commitments, server_Rs);
+            
+//             std::cout << "[Server] Generated " << server_R_commitments.size() << " commitments" << std::endl;
+            
+//             // STEP 2: Broadcast server's R-commitments to client
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 2: Broadcasting R-commitments to client..." << std::endl;
+//             net.broadcast("sign_" + txid + "_server_commit", serialize_commitments(server_R_commitments));
+            
+//             // STEP 3: Decommit phase - collect commitments from SERVERS ONLY
+//             // (Client commitments already stored via preprocessing store_presigning_data)
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 3: Collecting server commitments for decommit..." << std::endl;
+//             std::map<uint64_t, std::vector<eddsa_commitment>> server_commitments;
+//             server_commitments[my_id] = server_R_commitments; // Own commitments
+            
+//             // Collect ALL server commitments (both servers broadcast, so wait for 2 total)
+//             auto all_server_commits = net.await_data_custom_count("sign_" + txid + "_server_commit", 2);
+//             for (auto& [pid, hex] : all_server_commits) {
+//                 if (pid != my_id && pid != 1) { // Not self, not client
+//                     server_commitments[pid] = deserialize_commitments(hex);
+//                     std::cout << "[Server] Received " << server_commitments[pid].size() 
+//                               << " commitments from server " << pid << std::endl;
+//                 }
+//             }
+            
+//             std::cout << "[Server] Total SERVER commitments for decommit: " << server_commitments.size() << std::endl;
+            
+//             // Decommit R - SDK will load client commitments from internal storage
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 4: Decommitting Rs (have " << server_commitments.size() 
+//                       << " server commitments + client from storage)..." << std::endl;
+//             std::vector<elliptic_curve_point> decommitted_Rs;
+//             server.decommit_r(txid, server_commitments, decommitted_Rs);
+//             std::cout << "[Server] Decommitted " << decommitted_Rs.size() << " Rs" << std::endl;
+            
+//             // STEP 4.5: Exchange decommitted Rs with other servers
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 4.5: Broadcasting my Rs to other servers..." << std::endl;
+//             net.broadcast("sign_" + txid + "_server_decommit_r", serialize_elliptic_curve_points(decommitted_Rs));
+            
+//             // Wait for ALL server Rs (only 2 servers broadcast on this channel)
+//             auto all_server_Rs_data = net.await_data_custom_count("sign_" + txid + "_server_decommit_r", 2);
+//             std::map<uint64_t, std::vector<elliptic_curve_point>> all_Rs;
+//             all_Rs[my_id] = decommitted_Rs;
+//             for (auto& [pid, hex] : all_server_Rs_data) {
+//                 if (pid != my_id && pid != 1) { // Not self, not client
+//                     all_Rs[pid] = deserialize_elliptic_curve_points(hex);
+//                     std::cout << "[Server] Received " << all_Rs[pid].size() 
+//                               << " Rs from server " << pid << std::endl;
+//                 }
+//             }
+            
+//             // STEP 6: Broadcast R phase - aggregate all Rs
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 6: Calling broadcast_r with " << all_Rs.size() 
+//                       << " players' Rs..." << std::endl;
+//             uint64_t send_to;
+//             server.broadcast_r(txid, all_Rs, server_Rs, send_to);
+//             std::cout << "[Server] Broadcast Rs complete, got " << server_Rs.Rs.size() << " final Rs" << std::endl;
+            
+//             // STEP 7: Send Rs to client
+//             net.broadcast("sign_" + txid + "_server_r", serialize_Rs_and_commitments(server_Rs));
+            
+//             // Wait for client partial signatures (only client broadcasts on this channel)
+//             std::cout << "[Server] Waiting for client partial signatures..." << std::endl;
+//             auto r2_data = net.await_data_custom_count("sign_" + txid + "_r2", 1);
+//             auto client_partial_sigs = deserialize_eddsa_signatures(r2_data[1]);
+            
+//             // Process partial signatures
+//             std::cout << "[Server] " << std::endl;
+//             std::cout << "[Server] Step 7: Processing partial signatures..." << std::endl;
+//             std::vector<eddsa_signature> sigs;
+//             std::set<uint64_t> send_to_set;
+//             bool final_signature;
+//             server.broadcast_si(txid, 1, MPC_PROTOCOL_VERSION, client_partial_sigs, sigs, send_to_set, final_signature);
+            
+//             if (!final_signature) {
+//                 // Need another round - servers exchange their signatures
+//                 net.broadcast("sign_" + txid + "_r2_sigs", serialize_eddsa_signatures(sigs));
+//                 auto sigs_data = net.await_data_custom_count("sign_" + txid + "_r2_sigs", 2); // Only 2 servers
+                
+//                 std::cout << "[Server] Receive signatures from other servers!" << std::endl;
+//                 std::map<uint64_t, std::vector<eddsa_signature>> all_sigs;
+//                 for (auto& [pid, hex] : sigs_data) {
+//                     all_sigs[pid] = deserialize_eddsa_signatures(hex);
+//                 }
+                
+//                 server.get_eddsa_signature(txid, all_sigs, sigs);
+//             }
+            
+//             std::cout << "[Server] Final signature generated!" << std::endl;
+//             net.broadcast("sign_" + txid + "_r3", serialize_eddsa_signatures(sigs));
+//         }
+        
+//         std::cout << "=== SIGNING COMPLETE ===\n";
+        
+//     } catch (const cosigner_exception& e) {
+//         std::cerr << "[ERROR] Signing failed: " << e.what() << " (error code: " << e.error_code() << ")" << std::endl;
+//     } catch (const std::exception& e) {
+//         std::cerr << "[ERROR] Signing failed: " << e.what() << std::endl;
+//     }
+// }
+
+// int main(int argc, char* argv[]) {
+//     if (argc < 2) return 1;
+//     uint64_t my_id = std::stoull(argv[1]);
+
+//     InMemoryKeyPersistency persistency;
+//     SimplePlatform platform(my_id);
+//     NetworkManager network(my_id);
+
+//     // 1. Run Keygen
+//     run_keygen(my_id, network, persistency, platform);
+
+//     // 2. Interactive Mode
+//     while (true) {
+//         std::cout << "\n[1] Start New Signing Session\n[2] Join Signing Session\n> ";
+//         int choice;
+//         std::cin >> choice;
+
+//         std::string txid;
+//         if (choice == 1) {
+//             txid = "tx-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+//             std::cout << "Created signing session: " << txid << std::endl;
+//             std::cout << "Tell other nodes to join with this ID!\n";
+//         } else {
+//             std::cout << "Enter Transaction ID: ";
+//             std::cin >> txid;
+//         }
+        
+//         // Run Preprocessing (generate and distribute nonces)
+//         std::cout << "\n=== Running preprocessing for session " << txid << " ===\n";
+//         run_preprocessing(my_id, network, persistency, platform, txid);
+        
+//         run_signing(my_id, choice == 1, network, persistency, platform, txid);
+//     }
+//     return 0;
+// }

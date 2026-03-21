@@ -1,0 +1,61 @@
+cmake_minimum_required(VERSION 3.10)
+project(mpc_demo)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Find required packages
+find_package(CURL REQUIRED)
+
+# Include directories
+include_directories(
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/mpc-lib/include
+)
+
+# Collect all source files for the refactored structure
+set(SOURCES
+    # Main entry point
+    src/main.cpp
+    
+    # Utilities
+    src/utils/hex_utils.cpp
+    src/utils/serialization/commitment_serializer.cpp
+    src/utils/serialization/eddsa_serializer.cpp
+    
+    # Network
+    src/network/network_manager.cpp
+    
+    # Persistence
+    src/persistence/in_memory_key_persistency.cpp
+    src/persistence/mock_client_persistency.cpp
+    src/persistence/mock_server_persistency.cpp
+    
+    # Platform
+    src/platform/simple_platform.cpp
+    
+    # MPC Orchestrators
+    src/mpc/keygen_orchestrator.cpp
+    src/mpc/preprocessing_orchestrator.cpp
+    src/mpc/signing_orchestrator.cpp
+)
+
+# Create executable
+add_executable(mpc_app ${SOURCES})
+
+# Link libraries
+target_link_libraries(mpc_app
+    CURL::libcurl
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/cosigner/libcosigner.a
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/crypto/libcrypto_utils.a
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/crypto/elliptic_curve_algebra/libelliptic_curve_algebra.a
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/crypto/zero_knowledge_proof/libzero_knowledge_proof.a
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/crypto/paillier/libpaillier.a
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/crypto/commitments/libcommitments.a
+    ${CMAKE_SOURCE_DIR}/mpc-lib/build/src/common/crypto/GFp_curve_algebra/libGFp_curve_algebra.a
+    gmp
+    pthread
+)
+
+# Install target
+install(TARGETS mpc_app DESTINATION bin)

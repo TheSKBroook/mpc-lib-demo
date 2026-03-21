@@ -1,0 +1,55 @@
+# Specify the minimum version of CMake required
+cmake_minimum_required(VERSION 3.14)
+
+# Define your project name and the language (C++)
+project(MyMPCApplication
+    VERSION 1.0
+    LANGUAGES CXX
+)
+
+# Set the C++ standard (mpc-lib likely requires a modern standard)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+# --------------------------------------------------------------------------
+# 1. Add the mpc-lib sub-project
+# This tells CMake to process the CMakeLists.txt inside the mpc-lib folder.
+# This step builds the library target (usually named 'cosigner' or 'libcosigner').
+# --------------------------------------------------------------------------
+add_subdirectory(mpc-lib)
+
+# --------------------------------------------------------------------------
+# 2. Define your executable (your application)
+# This creates a target named 'mpc_app' from your main.cpp file.
+# --------------------------------------------------------------------------
+add_executable(mpc_app src/main.cpp)
+
+# --------------------------------------------------------------------------
+# 3. Link your executable to the library
+# This is the most crucial step: it tells the compiler/linker:
+# a) Where to find the mpc-lib header files.
+# b) Which compiled library file to link against.
+# We link against the target defined in mpc-lib's CMakeLists.txt (usually 'cosigner').
+# --------------------------------------------------------------------------
+target_link_libraries(mpc_app 
+    PRIVATE 
+        cosigner
+        # mpc-lib has dependencies like OpenSSL/libcrypto, 
+        # which its own CMake will usually handle. 
+        # If not, you might need to add them here, e.g.:
+        # OpenSSL::Crypto 
+)
+
+# --------------------------------------------------------------------------
+# 4. Optional: Set compiler flags
+# Good practice for a release build.
+# --------------------------------------------------------------------------
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    target_compile_options(mpc_app PRIVATE -O3 -DNDEBUG)
+endif()
+
+# --------------------------------------------------------------------------
+# 5. Optional: Install your application
+# This allows you to run 'make install' to copy the executable to a standard location.
+# --------------------------------------------------------------------------
+install(TARGETS mpc_app DESTINATION bin)

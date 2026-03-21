@@ -1,0 +1,8 @@
+/home/eason/demo/build/CMakeFiles/rebuild_cache.dir
+/home/eason/demo/build/CMakeFiles/edit_cache.dir
+/home/eason/demo/build/CMakeFiles/mpc_app.dir
+/home/eason/demo/build/mpc-lib/CMakeFiles/rebuild_cache.dir
+/home/eason/demo/build/mpc-lib/CMakeFiles/edit_cache.dir
+/home/eason/demo/build/mpc-lib/src/common/CMakeFiles/rebuild_cache.dir
+/home/eason/demo/build/mpc-lib/src/common/CMakeFiles/edit_cache.dir
+/home/eason/demo/build/mpc-lib/src/common/CMakeFiles/cosigner.dir
